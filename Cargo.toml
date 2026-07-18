@@ -1,14 +1,14 @@
 [package]
-name = "hds"
+name = "tree_finder"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "hds"
+name = "tree_finder"
 path = "src/lib.rs"
 
 [[bin]]
-name = "hds"
+name = "tree_finder"
 path = "src/main.rs"
 
 [dependencies]

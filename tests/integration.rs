@@ -2,10 +2,10 @@
 //! search, patch/conflict flow, history/restore, crash recovery, and the MCP
 //! message loop (spec §16.2 and acceptance criteria §17).
 
-use hds::domain::{Actor, ActorType, ErrorCode, IndexStatus, PatchFormat};
+use tree_finder::domain::{Actor, ActorType, ErrorCode, IndexStatus, PatchFormat};
 
-use hds::services::documents::{IfExists, ReadRange};
-use hds::services::{
+use tree_finder::services::documents::{IfExists, ReadRange};
+use tree_finder::services::{
     DocSelector, DocumentService, IndexService, SearchRequest, SearchService, Workspace,
 };
 use serde_json::{Value, json};
@@ -26,7 +26,7 @@ fn new_workspace() -> (tempfile::TempDir, Workspace) {
 
 const OPS_DOC: &str = "# Ops Guide\n\nIntro paragraph about operations.\n\n## Deployment\n\nDeploy with the blue-green strategy.\n\n### Rollback procedure\n\nTo roll back, redeploy the previous artifact and run smoke tests.\n\n## Monitoring\n\nDashboards live in Grafana.\n";
 
-fn create_ops_doc(ws: &Workspace) -> hds::services::documents::MutationOutcome {
+fn create_ops_doc(ws: &Workspace) -> tree_finder::services::documents::MutationOutcome {
     DocumentService::new(ws, actor(), "cli")
         .create(
             "notes/ops.md",
@@ -231,7 +231,7 @@ fn synthetic_groups_created_for_long_unheaded_ranges() {
     let groups: Vec<_> = index
         .nodes
         .values()
-        .filter(|n| n.kind == hds::domain::NodeKind::SyntheticGroup)
+        .filter(|n| n.kind == tree_finder::domain::NodeKind::SyntheticGroup)
         .collect();
     assert!(
         groups.len() >= 2,
@@ -281,7 +281,7 @@ fn search_is_deterministic() {
     };
     let a = search.search(&req).unwrap();
     let b = search.search(&req).unwrap();
-    let ids = |r: &hds::domain::SearchResult| -> Vec<String> {
+    let ids = |r: &tree_finder::domain::SearchResult| -> Vec<String> {
         r.results.iter().map(|h| h.node_id.clone()).collect()
     };
     assert_eq!(ids(&a), ids(&b));
@@ -363,7 +363,7 @@ fn patch_applies_and_stale_base_conflicts_without_write() {
             Some("loki".into()),
         )
         .expect("patch applies");
-    assert_eq!(out2.revision.operation, hds::domain::Operation::Patch);
+    assert_eq!(out2.revision.operation, tree_finder::domain::Operation::Patch);
     assert!(out2.diff_summary.is_some());
 
     // Same base again: conflict, and the file must not change.
@@ -420,7 +420,7 @@ fn restore_creates_new_revision_and_keeps_history() {
             None,
         )
         .unwrap();
-    assert_eq!(out3.revision.operation, hds::domain::Operation::Restore);
+    assert_eq!(out3.revision.operation, tree_finder::domain::Operation::Restore);
     // Content equals revision 1, history now has three entries.
     assert_eq!(
         ws.files.read_document("notes/ops.md", false).unwrap(),
@@ -521,7 +521,7 @@ fn create_conflicts_when_exists_and_overwrite_works() {
             IfExists::Overwrite,
         )
         .unwrap();
-    assert_eq!(out.revision.operation, hds::domain::Operation::Replace);
+    assert_eq!(out.revision.operation, tree_finder::domain::Operation::Replace);
 }
 
 #[test]
@@ -566,18 +566,18 @@ fn recovery_finalizes_completed_write_and_rolls_back_unapplied() {
     // Simulate a crash after the file replace but before finalize:
     // insert a pending revision whose after-hash matches a new file state.
     let new_content = OPS_DOC.replace("Grafana", "Datadog");
-    let new_hash = hds::infra::file_store::content_hash(&new_content);
-    let pending = hds::domain::Revision {
+    let new_hash = tree_finder::infra::file_store::content_hash(&new_content);
+    let pending = tree_finder::domain::Revision {
         revision_id: ulid::Ulid::generate().to_string(),
         parent_revision_id: Some(doc.current_revision.clone()),
         document_id: doc.document_id.clone(),
         actor: actor(),
-        operation: hds::domain::Operation::Replace,
+        operation: tree_finder::domain::Operation::Replace,
         before_hash: Some(doc.content_hash.clone()),
         after_hash: Some(new_hash.clone()),
         message: None,
         created_at: chrono::Utc::now(),
-        patch_format: hds::domain::PatchFormat::FullSnapshot,
+        patch_format: tree_finder::domain::PatchFormat::FullSnapshot,
     };
     ws.files
         .write_snapshot(&doc.document_id, &pending.revision_id, &new_content)
@@ -597,17 +597,17 @@ fn recovery_finalizes_completed_write_and_rolls_back_unapplied() {
     // Simulate a crash before the file replace: pending revision, file
     // still at the old content. Recovery must roll the record back.
     let doc = doc_after;
-    let unapplied = hds::domain::Revision {
+    let unapplied = tree_finder::domain::Revision {
         revision_id: ulid::Ulid::generate().to_string(),
         parent_revision_id: Some(doc.current_revision.clone()),
         document_id: doc.document_id.clone(),
         actor: actor(),
-        operation: hds::domain::Operation::Replace,
+        operation: tree_finder::domain::Operation::Replace,
         before_hash: Some(doc.content_hash.clone()),
         after_hash: Some("sha256:deadbeef".to_string()),
         message: None,
         created_at: chrono::Utc::now(),
-        patch_format: hds::domain::PatchFormat::FullSnapshot,
+        patch_format: tree_finder::domain::PatchFormat::FullSnapshot,
     };
     ws.db.insert_revision(&unapplied, "pending").unwrap();
     drop(ws);
@@ -681,7 +681,7 @@ async fn start_mcp(
 ) -> (RunningService<RoleClient, RecordingClient>, RecordingClient) {
     let (client_io, server_io) = tokio::io::duplex(1 << 20);
     tokio::spawn(async move {
-        if let Ok(server) = hds::mcp::HdsMcpServer::new(ws).serve(server_io).await {
+        if let Ok(server) = tree_finder::mcp::HdsMcpServer::new(ws).serve(server_io).await {
             let _ = server.waiting().await;
         }
     });

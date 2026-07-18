@@ -1,3 +1,3 @@
 fn main() {
-    std::process::exit(hds::cli::run());
+    std::process::exit(tree_finder::cli::run());
 }
