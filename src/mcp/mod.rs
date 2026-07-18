@@ -112,7 +112,7 @@ impl ServerHandler for HdsMcpServer {
         );
         info.server_info = {
             let mut imp = Implementation::from_build_env();
-            imp.name = "hds".to_string();
+            imp.name = "tree_finder".to_string();
             imp.title = Some("Hierarchical Document Store".to_string());
             imp.version = env!("CARGO_PKG_VERSION").to_string();
             imp
