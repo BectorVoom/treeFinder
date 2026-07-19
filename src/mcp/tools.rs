@@ -7,12 +7,14 @@ use crate::domain::{Actor, ErrorCode, HdsError, HdsResult, PatchFormat};
 use crate::mcp::{ChangeSet, ToolFailure};
 use crate::services::{
     DocSelector, DocumentService, IndexService, SearchRequest, SearchService, Workspace,
+    WorkspaceRegistry,
     documents::{IfExists, ReadRange},
     indexing::render_subtree,
 };
 use rmcp::model::{CallToolRequestParams, Tool};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 struct ToolDef {
@@ -40,7 +42,7 @@ fn tool_defs() -> Vec<ToolDef> {
         }
         base
     };
-    vec![
+    let mut defs = vec![
         ToolDef {
             name: "document_create",
             description: "Create a Markdown document at a workspace-relative path. Records a revision, an audit event, and builds the tree index.",
@@ -173,7 +175,30 @@ fn tool_defs() -> Vec<ToolDef> {
                 "force": { "type": "boolean" },
             })),
         },
-    ]
+    ];
+    // Every workspace-scoped tool accepts an optional `workspace` argument so
+    // one long-lived server can address several workspaces.
+    for def in &mut defs {
+        if let Some(props) = def.schema["properties"].as_object_mut() {
+            props.insert(
+                "workspace".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "Path to (or inside) the target workspace root. Defaults to the server's startup workspace.",
+                }),
+            );
+        }
+    }
+    defs.push(ToolDef {
+        name: "workspace_list",
+        description: "List the workspaces this server has open, marking the default one.",
+        schema: json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        }),
+    });
+    defs
 }
 
 fn allowed(ws: &Workspace, name: &str) -> bool {
@@ -181,10 +206,14 @@ fn allowed(ws: &Workspace, name: &str) -> bool {
     allowlist.is_empty() || allowlist.iter().any(|t| t == name)
 }
 
-pub(crate) fn list_tools(ws: &Workspace) -> Vec<Tool> {
+pub(crate) fn list_tools(registry: &WorkspaceRegistry) -> Vec<Tool> {
+    // The default workspace's allowlist governs the advertised tool set; with
+    // no default, everything is advertised and each call is checked against
+    // its target workspace's configuration in `dispatch`.
+    let default_ws = registry.default_workspace();
     tool_defs()
         .into_iter()
-        .filter(|t| allowed(ws, t.name))
+        .filter(|t| default_ws.map(|ws| allowed(ws, t.name)).unwrap_or(true))
         .map(|t| {
             let schema = t.schema.as_object().cloned().unwrap_or_default();
             Tool::new(t.name, t.description, Arc::new(schema))
@@ -195,7 +224,7 @@ pub(crate) fn list_tools(ws: &Workspace) -> Vec<Tool> {
 /// Route one tools/call to the shared services. Returns the structured
 /// result plus the notifications it made due.
 pub(crate) fn dispatch(
-    ws: &Workspace,
+    registry: &mut WorkspaceRegistry,
     actor: &Actor,
     request: &CallToolRequestParams,
 ) -> Result<(Value, ChangeSet), ToolFailure> {
@@ -205,6 +234,39 @@ pub(crate) fn dispatch(
         .clone()
         .map(Value::Object)
         .unwrap_or_else(|| json!({}));
+
+    // Reject unknown tools before touching any workspace so a bad name plus a
+    // bad `workspace` argument still maps to a JSON-RPC error.
+    if !tool_defs().iter().any(|d| d.name == name) {
+        return Err(ToolFailure::UnknownTool(name.to_string()));
+    }
+
+    // Server-level metadata: not scoped to one workspace, but gated by the
+    // default workspace's allowlist to match what `list_tools` advertises.
+    if name == "workspace_list" {
+        if let Some(ws) = registry.default_workspace()
+            && !allowed(ws, name)
+        {
+            return Err(HdsError::new(
+                ErrorCode::PermissionDenied,
+                format!("tool '{name}' is not allowed by workspace configuration"),
+            )
+            .into());
+        }
+        let default_root = registry.default_root().map(Path::to_path_buf);
+        let workspaces: Vec<Value> = registry
+            .iter()
+            .map(|(root, _)| {
+                json!({
+                    "root": root.display().to_string(),
+                    "default": Some(root.as_path()) == default_root.as_deref(),
+                })
+            })
+            .collect();
+        return Ok((json!({ "workspaces": workspaces }), ChangeSet::default()));
+    }
+
+    let ws: &Workspace = registry.resolve(args.get("workspace").and_then(Value::as_str))?;
 
     if !allowed(ws, name) {
         return Err(HdsError::new(

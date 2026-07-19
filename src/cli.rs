@@ -7,7 +7,9 @@ use crate::domain::{Actor, ActorType, ErrorCode, HdsError, PatchFormat};
 use crate::search::eval;
 use crate::services::{
     DocSelector, DocumentService, IndexService, SearchRequest, SearchService, Workspace,
+    WorkspaceRegistry,
     documents::{IfExists, ReadRange},
+    find_workspace_root,
 };
 use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
@@ -250,17 +252,8 @@ fn find_workspace(explicit: Option<&Path>) -> Result<PathBuf, HdsError> {
     if let Some(p) = explicit {
         return Ok(p.to_path_buf());
     }
-    let mut dir = std::env::current_dir().map_err(HdsError::internal)?;
-    loop {
-        if dir.join(".hds").join("config.yaml").is_file() {
-            return Ok(dir);
-        }
-        if !dir.pop() {
-            return Err(HdsError::not_found(
-                "workspace (no .hds directory here or above; run `hds init`)",
-            ));
-        }
-    }
+    let dir = std::env::current_dir().map_err(HdsError::internal)?;
+    find_workspace_root(&dir)
 }
 
 fn open_workspace(explicit: Option<&Path>) -> Result<Workspace, HdsError> {
@@ -490,10 +483,26 @@ fn dispatch(cli: Cli) -> Result<(), HdsError> {
                     "only --transport stdio is supported in this release",
                 ));
             }
-            let ws = open_workspace(cli.workspace.as_deref())?;
+            // An explicit --workspace must exist; without one, a server
+            // started outside any workspace still runs and serves whichever
+            // workspaces tool calls name via their 'workspace' argument.
+            let registry = match cli.workspace.as_deref() {
+                Some(path) => WorkspaceRegistry::with_default(open_workspace(Some(path))?),
+                None => match open_workspace(None) {
+                    Ok(ws) => WorkspaceRegistry::with_default(ws),
+                    Err(e) if e.code == ErrorCode::NotFound => {
+                        eprintln!(
+                            "no workspace here; serving without a default \
+                             (tool calls must pass 'workspace')"
+                        );
+                        WorkspaceRegistry::new()
+                    }
+                    Err(e) => return Err(e),
+                },
+            };
             // The rmcp server reports failures as anyhow chains; flatten the
             // chain into one internal-error message for exit-code mapping.
-            crate::mcp::serve_stdio(ws).map_err(|e| HdsError::internal(format!("{e:#}")))
+            crate::mcp::serve_stdio(registry).map_err(|e| HdsError::internal(format!("{e:#}")))
         }
         Command::Doctor { json } => {
             let ws = open_workspace(cli.workspace.as_deref())?;

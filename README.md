@@ -15,7 +15,7 @@ echo '# Notes' | hds document create notes/plan.md
 hds document list                         # UUID, path, revision, index status
 hds tree show notes/plan.md               # heading tree with node IDs and line spans
 hds search "rollback procedure" --trace   # ranked nodes + score breakdown + traversal trace
-hds mcp serve --transport stdio           # MCP server (12 tools, hds:// resources)
+hds mcp serve --transport stdio           # MCP server (13 tools, hds:// resources)
 hds doctor                                # integrity checks
 ```
 
@@ -73,9 +73,20 @@ spins up a tokio runtime and serves the stdio transport (`anyhow` wraps the
 bootstrap errors; domain errors stay `thiserror`-based `HdsError`s).
 
 Tools: `document_create/get/patch/replace/list/history/diff/restore`,
-`tree_get`, `node_get`, `search_hierarchy`, `index_rebuild`. Application
-errors return `isError` results with stable payloads
-(`{code, message, details, retryable}`, e.g. `REVISION_CONFLICT`).
+`tree_get`, `node_get`, `search_hierarchy`, `index_rebuild`,
+`workspace_list`. Application errors return `isError` results with stable
+payloads (`{code, message, details, retryable}`, e.g. `REVISION_CONFLICT`).
+
+**Multi-workspace serving.** One long-lived server can address several
+workspaces: every workspace-scoped tool accepts an optional `workspace`
+argument — a path to (or inside) a workspace root — which the server resolves
+by walking up to the nearest `.hds` and opens on demand. Calls without it go
+to the default workspace (the one `hds mcp serve` was started in, or
+`--workspace`). Started outside any workspace, the server still runs and
+requires `workspace` on each call. `workspace_list` reports the open roots;
+resource listing and `hds://` reads span all open workspaces. Each
+workspace keeps its own config (allowlist, read-only mode), enforced per
+call.
 
 Resources: `hds://documents`, `hds://document/{id}[/content|/tree|/node/{node}|/history|/revision/{rev}]`,
 `hds://search-run/{id}/trace`, plus resource templates, list pagination,
@@ -84,13 +95,13 @@ only after durable commits.
 
 ## Tests
 
-`cargo test` — 33 tests: path/symlink sandboxing, tree construction (skipped
+`cargo test` — 37 tests: path/symlink sandboxing, tree construction (skipped
 heading levels, code-block immunity, synthetic groups, stable node IDs),
 scorer signals, deterministic beam search with visit budgets, patch/conflict,
 restore-preserves-history, audit content-leak checks, pagination, crash
 recovery at both protocol stages, rebuild-from-files, and the full MCP flow
 (driven by a real `rmcp` client over an in-process duplex transport,
-including subscription/notification delivery).
+including subscription/notification delivery and multi-workspace serving).
 `cargo fmt` and `cargo clippy --all-targets` are clean.
 
 ## Known limitations (MVP)

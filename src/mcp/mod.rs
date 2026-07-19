@@ -2,7 +2,7 @@
 //!
 //! Read-only data is exposed as `hds://` resources; mutations and search are
 //! tools. `HdsMcpServer` implements `rmcp::ServerHandler` directly (no tool
-//! macros) so all twelve tools route through the same application services
+//! macros) so all tools route through the same application services
 //! the CLI uses. Application failures surface as tool results carrying the
 //! stable wire payload (spec §11.5); JSON-RPC errors are reserved for
 //! unroutable requests. Resource-updated and list-changed notifications are
@@ -13,7 +13,7 @@ mod resources;
 mod tools;
 
 use crate::domain::{Actor, ActorType, HdsError};
-use crate::services::Workspace;
+use crate::services::{Workspace, WorkspaceRegistry};
 use anyhow::Context as _;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ErrorData as McpError, Implementation,
@@ -35,23 +35,29 @@ pub(crate) struct ChangeSet {
 
 #[derive(Clone)]
 pub struct HdsMcpServer {
-    // The workspace holds a rusqlite connection (Send, not Sync), so all
+    // Each workspace holds a rusqlite connection (Send, not Sync), so all
     // service work runs under one mutex. Handlers never await while holding
     // the guard.
-    ws: Arc<Mutex<Workspace>>,
+    registry: Arc<Mutex<WorkspaceRegistry>>,
     subscriptions: Arc<Mutex<HashSet<String>>>,
 }
 
 impl HdsMcpServer {
+    /// Serve a single workspace as the default.
     pub fn new(ws: Workspace) -> Self {
+        Self::from_registry(WorkspaceRegistry::with_default(ws))
+    }
+
+    /// Serve a registry; requests may address any workspace it can open.
+    pub fn from_registry(registry: WorkspaceRegistry) -> Self {
         HdsMcpServer {
-            ws: Arc::new(Mutex::new(ws)),
+            registry: Arc::new(Mutex::new(registry)),
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    fn workspace(&self) -> std::sync::MutexGuard<'_, Workspace> {
-        self.ws
+    fn registry(&self) -> std::sync::MutexGuard<'_, WorkspaceRegistry> {
+        self.registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -134,8 +140,8 @@ impl ServerHandler for HdsMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let actor = self.actor_for(&context);
         let outcome = {
-            let ws = self.workspace();
-            tools::dispatch(&ws, &actor, &request)
+            let mut registry = self.registry();
+            tools::dispatch(&mut registry, &actor, &request)
         };
         match outcome {
             Ok((value, changes)) => {
@@ -155,9 +161,9 @@ impl ServerHandler for HdsMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, McpError> {
-        let ws = self.workspace();
+        let registry = self.registry();
         Ok(rmcp::model::ListToolsResult::with_all_items(
-            tools::list_tools(&ws),
+            tools::list_tools(&registry),
         ))
     }
 
@@ -166,9 +172,9 @@ impl ServerHandler for HdsMcpServer {
         request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let ws = self.workspace();
+        let registry = self.registry();
         let cursor = request.and_then(|r| r.cursor).map(|c| c.to_string());
-        resources::list(&ws, cursor.as_deref()).map_err(to_protocol_error)
+        resources::list(&registry, cursor.as_deref()).map_err(to_protocol_error)
     }
 
     async fn list_resource_templates(
@@ -187,8 +193,8 @@ impl ServerHandler for HdsMcpServer {
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         let actor = self.actor_for(&context);
-        let ws = self.workspace();
-        resources::read(&ws, &actor, &request.uri)
+        let registry = self.registry();
+        resources::read(&registry, &actor, &request.uri)
             .map(|contents| ReadResourceResult::new(vec![contents]))
             .map_err(|e| match e.code {
                 crate::domain::ErrorCode::NotFound => {
@@ -241,10 +247,10 @@ fn to_protocol_error(e: HdsError) -> McpError {
 }
 
 /// Blocking stdio server loop (spawns a tokio runtime for rmcp).
-pub fn serve_stdio(ws: Workspace) -> anyhow::Result<()> {
+pub fn serve_stdio(registry: WorkspaceRegistry) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("failed to start async runtime")?;
     runtime.block_on(async {
-        let service = HdsMcpServer::new(ws)
+        let service = HdsMcpServer::from_registry(registry)
             .serve(rmcp::transport::stdio())
             .await
             .context("MCP server failed to initialize")?;

@@ -6,10 +6,12 @@
 
 pub mod documents;
 pub mod indexing;
+pub mod registry;
 pub mod searching;
 
 pub use documents::{DocSelector, DocumentService};
 pub use indexing::IndexService;
+pub use registry::{WorkspaceRegistry, find_workspace_root};
 pub use searching::{SearchRequest, SearchService};
 
 use crate::config::Config;

@@ -4,12 +4,13 @@
 
 use tree_finder::domain::{Actor, ActorType, ErrorCode, IndexStatus, PatchFormat};
 
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use tree_finder::services::documents::{IfExists, ReadRange};
 use tree_finder::services::{
     DocSelector, DocumentService, IndexService, SearchRequest, SearchService, Workspace,
+    WorkspaceRegistry,
 };
-use serde_json::{Value, json};
-use std::collections::BTreeMap;
 
 fn actor() -> Actor {
     Actor {
@@ -363,7 +364,10 @@ fn patch_applies_and_stale_base_conflicts_without_write() {
             Some("loki".into()),
         )
         .expect("patch applies");
-    assert_eq!(out2.revision.operation, tree_finder::domain::Operation::Patch);
+    assert_eq!(
+        out2.revision.operation,
+        tree_finder::domain::Operation::Patch
+    );
     assert!(out2.diff_summary.is_some());
 
     // Same base again: conflict, and the file must not change.
@@ -420,7 +424,10 @@ fn restore_creates_new_revision_and_keeps_history() {
             None,
         )
         .unwrap();
-    assert_eq!(out3.revision.operation, tree_finder::domain::Operation::Restore);
+    assert_eq!(
+        out3.revision.operation,
+        tree_finder::domain::Operation::Restore
+    );
     // Content equals revision 1, history now has three entries.
     assert_eq!(
         ws.files.read_document("notes/ops.md", false).unwrap(),
@@ -521,7 +528,10 @@ fn create_conflicts_when_exists_and_overwrite_works() {
             IfExists::Overwrite,
         )
         .unwrap();
-    assert_eq!(out.revision.operation, tree_finder::domain::Operation::Replace);
+    assert_eq!(
+        out.revision.operation,
+        tree_finder::domain::Operation::Replace
+    );
 }
 
 #[test]
@@ -679,9 +689,19 @@ impl ClientHandler for RecordingClient {
 async fn start_mcp(
     ws: Workspace,
 ) -> (RunningService<RoleClient, RecordingClient>, RecordingClient) {
+    start_mcp_registry(WorkspaceRegistry::with_default(ws)).await
+}
+
+/// Serve a workspace registry over an in-process duplex pipe.
+async fn start_mcp_registry(
+    registry: WorkspaceRegistry,
+) -> (RunningService<RoleClient, RecordingClient>, RecordingClient) {
     let (client_io, server_io) = tokio::io::duplex(1 << 20);
     tokio::spawn(async move {
-        if let Ok(server) = tree_finder::mcp::HdsMcpServer::new(ws).serve(server_io).await {
+        if let Ok(server) = tree_finder::mcp::HdsMcpServer::from_registry(registry)
+            .serve(server_io)
+            .await
+        {
             let _ = server.waiting().await;
         }
     });
@@ -740,7 +760,7 @@ async fn mcp_full_flow_create_read_patch_tree_search_history() {
     assert_eq!(resources.list_changed, Some(true));
 
     let tools = client.list_tools(None).await.unwrap();
-    assert_eq!(tools.tools.len(), 12);
+    assert_eq!(tools.tools.len(), 13);
 
     // Create a document (criterion 1: immediately discoverable + readable).
     let created = call(
@@ -1028,4 +1048,226 @@ fn index_status_transitions_to_ready_after_write() {
         .unwrap()
         .unwrap();
     assert_eq!(doc.index_status, IndexStatus::Ready);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-workspace MCP serving
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mcp_workspace_argument_targets_other_workspaces() {
+    let (_dir_a, ws_a) = new_workspace();
+    let dir_b = tempfile::tempdir().expect("tempdir");
+    Workspace::init(dir_b.path()).expect("init b");
+    let (client, _notifications) = start_mcp(ws_a).await;
+
+    // Calls without a `workspace` argument go to the default workspace.
+    let a = call(
+        &client,
+        "document_create",
+        json!({ "path": "a.md", "content": "# A\n" }),
+    )
+    .await;
+    assert_eq!(a.is_error, Some(false));
+
+    // A call naming workspace B opens it on demand and writes there.
+    let b = call(
+        &client,
+        "document_create",
+        json!({
+            "path": "b.md",
+            "content": "# B doc\n\nOnly in workspace B.\n",
+            "workspace": dir_b.path().to_string_lossy(),
+        }),
+    )
+    .await;
+    assert_eq!(b.is_error, Some(false), "create in B failed: {b:?}");
+    assert!(dir_b.path().join("documents/b.md").is_file());
+
+    // Listings are scoped to the addressed workspace; a path *inside* the
+    // workspace resolves to its root by walking up to `.hds`.
+    let paths = |result: &CallToolResult| -> Vec<String> {
+        structured(result)["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["logical_path"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let list_default = call(&client, "document_list", json!({})).await;
+    assert_eq!(paths(&list_default), vec!["a.md"]);
+    let inside_b = dir_b.path().join("documents");
+    let list_b = call(
+        &client,
+        "document_list",
+        json!({ "workspace": inside_b.to_string_lossy() }),
+    )
+    .await;
+    assert_eq!(paths(&list_b), vec!["b.md"]);
+
+    // workspace_list reports both, with exactly one default.
+    let wl = call(&client, "workspace_list", json!({})).await;
+    assert_eq!(wl.is_error, Some(false));
+    let workspaces = structured(&wl)["workspaces"].as_array().unwrap().clone();
+    assert_eq!(workspaces.len(), 2);
+    assert_eq!(
+        workspaces
+            .iter()
+            .filter(|w| w["default"] == json!(true))
+            .count(),
+        1
+    );
+    let b_canon = dir_b.path().canonicalize().unwrap();
+    assert!(
+        workspaces
+            .iter()
+            .any(|w| w["root"].as_str().unwrap() == b_canon.to_string_lossy())
+    );
+
+    // Reads honor the workspace argument too.
+    let got = call(
+        &client,
+        "document_get",
+        json!({ "path": "b.md", "workspace": dir_b.path().to_string_lossy() }),
+    )
+    .await;
+    assert_eq!(got.is_error, Some(false));
+    assert!(
+        structured(&got)["content"]
+            .as_str()
+            .unwrap()
+            .contains("Only in workspace B")
+    );
+
+    // A path outside any workspace is a structured NOT_FOUND, and the server
+    // keeps serving afterwards.
+    let missing = tempfile::tempdir().expect("tempdir");
+    let bad = call(
+        &client,
+        "document_list",
+        json!({ "workspace": missing.path().to_string_lossy() }),
+    )
+    .await;
+    assert_eq!(bad.is_error, Some(true));
+    assert_eq!(structured(&bad)["code"], "NOT_FOUND");
+    let still_ok = call(&client, "document_list", json!({})).await;
+    assert_eq!(still_ok.is_error, Some(false));
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn mcp_serves_without_default_workspace() {
+    let (client, _notifications) = start_mcp_registry(WorkspaceRegistry::new()).await;
+
+    let wl = call(&client, "workspace_list", json!({})).await;
+    assert_eq!(wl.is_error, Some(false));
+    assert_eq!(structured(&wl)["workspaces"].as_array().unwrap().len(), 0);
+
+    // Without a default, calls must name a workspace.
+    let no_ws = call(&client, "document_list", json!({})).await;
+    assert_eq!(no_ws.is_error, Some(true));
+    assert_eq!(structured(&no_ws)["code"], "INVALID_ARGUMENT");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    Workspace::init(dir.path()).expect("init");
+    let created = call(
+        &client,
+        "document_create",
+        json!({
+            "path": "n.md",
+            "content": "# N\n",
+            "workspace": dir.path().to_string_lossy(),
+        }),
+    )
+    .await;
+    assert_eq!(created.is_error, Some(false), "create failed: {created:?}");
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn mcp_resources_span_open_workspaces() {
+    let (_dir_a, ws_a) = new_workspace();
+    let dir_b = tempfile::tempdir().expect("tempdir");
+    Workspace::init(dir_b.path()).expect("init b");
+    let (client, _notifications) = start_mcp(ws_a).await;
+
+    let a = call(
+        &client,
+        "document_create",
+        json!({ "path": "a.md", "content": "# A\n" }),
+    )
+    .await;
+    let a_id = structured(&a)["document"]["document_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let b = call(
+        &client,
+        "document_create",
+        json!({
+            "path": "b.md",
+            "content": "# B resource\n",
+            "workspace": dir_b.path().to_string_lossy(),
+        }),
+    )
+    .await;
+    let b_id = structured(&b)["document"]["document_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // resources/list pages workspace by workspace; walking the cursor chain
+    // must surface documents from both workspaces.
+    let mut uris = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let request = cursor
+            .take()
+            .map(|c| rmcp::model::PaginatedRequestParams::default().with_cursor(Some(c)));
+        let page = client.list_resources(request).await.unwrap();
+        uris.extend(page.resources.iter().map(|r| r.uri.clone()));
+        match page.next_cursor {
+            Some(c) => cursor = Some(c),
+            None => break,
+        }
+    }
+    assert!(uris.contains(&"hds://documents".to_string()));
+    assert!(uris.contains(&format!("hds://document/{a_id}/content")));
+    assert!(uris.contains(&format!("hds://document/{b_id}/content")));
+
+    // Document-id URIs resolve across workspaces.
+    let read = client
+        .read_resource(ReadResourceRequestParams::new(format!(
+            "hds://document/{b_id}/content"
+        )))
+        .await
+        .unwrap();
+    let text = match &read.contents[0] {
+        ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text contents"),
+    };
+    assert!(text.contains("# B resource"));
+
+    // The aggregate descriptor listing spans both workspaces.
+    let all = client
+        .read_resource(ReadResourceRequestParams::new("hds://documents"))
+        .await
+        .unwrap();
+    let all_text = match &all.contents[0] {
+        ResourceContents::TextResourceContents { text, .. } => text.clone(),
+        _ => panic!("expected text contents"),
+    };
+    let docs: Value = serde_json::from_str(&all_text).unwrap();
+    let ids: Vec<&str> = docs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["document_id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&a_id.as_str()));
+    assert!(ids.contains(&b_id.as_str()));
+
+    client.cancel().await.ok();
 }
