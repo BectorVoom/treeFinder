@@ -10,12 +10,12 @@ prompts, or schemas).
 
 ```sh
 cargo build --release                     # build ./target/release/hds
-hds init my-workspace && cd my-workspace  # create workspace (documents/ + .hds/)
+hds init my-workspace && cd my-workspace  # create workspace (documents/ + .treefinder/)
 echo '# Notes' | hds document create notes/plan.md
 hds document list                         # UUID, path, revision, index status
 hds tree show notes/plan.md               # heading tree with node IDs and line spans
 hds search "rollback procedure" --trace   # ranked nodes + score breakdown + traversal trace
-hds mcp serve --transport stdio           # MCP server (13 tools, hds:// resources)
+hds mcp serve --transport stdio           # MCP server (13 tools, treefinder:// resources)
 hds doctor                                # integrity checks
 ```
 
@@ -47,20 +47,20 @@ domain     src/domain/              pure data types + stable error codes
 ```
 
 - **Files are canonical.** Markdown lives in `documents/`; everything under
-  `.hds/` (SQLite metadata, revision snapshots, index JSON, audit log,
+  `.treefinder/` (SQLite metadata, revision snapshots, index JSON, audit log,
   config) is derived or append-only and indexes are rebuildable from files +
   metadata alone.
 - **Every write follows a recoverable protocol** (snapshot → pending revision
   → atomic temp-file rename → hash verify → finalize). On startup, pending
   writes are reconciled by hash; ambiguous states are surfaced by
   `hds doctor`, never discarded.
-- **Algorithms are configuration.** `.hds/config.yaml` selects
+- **Algorithms are configuration.** `.treefinder/config.yaml` selects
   `tree.builder` and `search.default_strategy`; strategies/builders register
   in registries, and per-request override is allowed unless disabled. Every
   search result carries strategy name/version, config hash, revision and
   index version, per-signal score breakdown, and a persisted traversal trace
-  (`hds://search-run/{id}/trace`).
-- **Sandboxing:** logical paths only (no absolute paths, no `..`, no `.hds`,
+  (`treefinder://search-run/{id}/trace`).
+- **Sandboxing:** logical paths only (no absolute paths, no `..`, no `.treefinder`,
   Markdown extensions only), symlinks rejected by default, size/query/visit
   limits, read-only mode, and an MCP tool allowlist. Audit entries carry
   sanitized arguments — never document content or secrets.
@@ -84,16 +84,16 @@ protocol version defines: `resources/subscribe` before 2026-07-28, and
 **Multi-workspace serving.** One long-lived server can address several
 workspaces: every workspace-scoped tool accepts an optional `workspace`
 argument — a path to (or inside) a workspace root — which the server resolves
-by walking up to the nearest `.hds` and opens on demand. Calls without it go
+by walking up to the nearest `.treefinder` and opens on demand. Calls without it go
 to the default workspace (the one `hds mcp serve` was started in, or
 `--workspace`). Started outside any workspace, the server still runs and
 requires `workspace` on each call. `workspace_list` reports the open roots;
-resource listing and `hds://` reads span all open workspaces. Each
+resource listing and `treefinder://` reads span all open workspaces. Each
 workspace keeps its own config (allowlist, read-only mode), enforced per
 call.
 
-Resources: `hds://documents`, `hds://document/{id}[/content|/tree|/node/{node}|/history|/revision/{rev}]`,
-`hds://search-run/{id}/trace`, plus resource templates, list pagination,
+Resources: `treefinder://documents`, `treefinder://document/{id}[/content|/tree|/node/{node}|/history|/revision/{rev}]`,
+`treefinder://search-run/{id}/trace`, plus resource templates, list pagination,
 subscriptions, and `resources/updated` / `list_changed` notifications emitted
 only after durable commits.
 

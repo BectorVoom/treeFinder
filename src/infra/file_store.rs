@@ -33,7 +33,7 @@ impl FileStore {
             .ok_or_else(|| HdsError::internal("target has no parent directory"))?;
         std::fs::create_dir_all(parent)?;
         let tmp = parent.join(format!(
-            ".hds-tmp-{}-{}",
+            ".treefinder-tmp-{}-{}",
             std::process::id(),
             ulid::Ulid::generate()
         ));

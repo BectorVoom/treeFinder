@@ -227,7 +227,7 @@ impl<'a> SearchService<'a> {
         };
 
         // Persist the full run (always with trace) so
-        // hds://search-run/{id}/trace stays available afterwards.
+        // treefinder://search-run/{id}/trace stays available afterwards.
         self.ws.db.record_search_run(
             &run_id,
             Utc::now(),

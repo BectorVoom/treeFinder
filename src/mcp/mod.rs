@@ -1,6 +1,6 @@
 //! MCP server built on the official `rmcp` SDK (stdio transport).
 //!
-//! Read-only data is exposed as `hds://` resources; mutations and search are
+//! Read-only data is exposed as `treefinder://` resources; mutations and search are
 //! tools. `HdsMcpServer` implements `rmcp::ServerHandler` directly (no tool
 //! macros) so all tools route through the same application services
 //! the CLI uses. Application failures surface as tool results carrying the
@@ -100,9 +100,9 @@ impl HdsMcpServer {
             Some(id) => {
                 let mut uris: Vec<String> = ["content", "tree", "history"]
                     .iter()
-                    .map(|s| format!("hds://document/{id}/{s}"))
+                    .map(|s| format!("treefinder://document/{id}/{s}"))
                     .collect();
-                uris.push(format!("hds://document/{id}"));
+                uris.push(format!("treefinder://document/{id}"));
                 uris
             }
             None => Vec::new(),
@@ -203,7 +203,7 @@ impl ServerHandler for HdsMcpServer {
             "Markdown documents with tree indexes. Use search_hierarchy to find \
              relevant nodes, tree_get/node_get to navigate, and document_patch \
              (unified diff + base_revision) to edit. Read-only data is also \
-             available as hds:// resources."
+             available as treefinder:// resources."
                 .to_string(),
         );
         info

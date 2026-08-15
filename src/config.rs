@@ -1,4 +1,4 @@
-//! Workspace configuration (`.hds/config.yaml`).
+//! Workspace configuration (`.treefinder/config.yaml`).
 //!
 //! Selection of tree builder and search strategy is configuration-driven so
 //! algorithms can be swapped without touching adapters or repositories.

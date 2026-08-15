@@ -1,4 +1,4 @@
-//! MCP resources: read-only `hds://` URIs for documents, trees, nodes,
+//! MCP resources: read-only `treefinder://` URIs for documents, trees, nodes,
 //! history, revisions, and search traces. Reads are side-effect free.
 
 use crate::domain::{Actor, ErrorCode, HdsError, HdsResult};
@@ -16,43 +16,43 @@ pub(crate) fn templates() -> Vec<ResourceTemplate> {
     };
     vec![
         t(
-            "hds://document/{document_id}",
+            "treefinder://document/{document_id}",
             "document-descriptor",
             "Document metadata and revision state",
             "application/json",
         ),
         t(
-            "hds://document/{document_id}/content",
+            "treefinder://document/{document_id}/content",
             "document-content",
             "Current Markdown content",
             "text/markdown",
         ),
         t(
-            "hds://document/{document_id}/tree",
+            "treefinder://document/{document_id}/tree",
             "document-tree",
             "Hierarchical tree index",
             "application/json",
         ),
         t(
-            "hds://document/{document_id}/node/{node_id}",
+            "treefinder://document/{document_id}/node/{node_id}",
             "document-node",
             "One tree node with content",
             "application/json",
         ),
         t(
-            "hds://document/{document_id}/history",
+            "treefinder://document/{document_id}/history",
             "document-history",
             "Revision history (newest first)",
             "application/json",
         ),
         t(
-            "hds://document/{document_id}/revision/{revision_id}",
+            "treefinder://document/{document_id}/revision/{revision_id}",
             "document-revision",
             "Snapshot of one revision",
             "text/markdown",
         ),
         t(
-            "hds://search-run/{search_run_id}/trace",
+            "treefinder://search-run/{search_run_id}/trace",
             "search-trace",
             "Traversal trace of a search run",
             "application/json",
@@ -87,7 +87,7 @@ pub(crate) fn list(
     let mut resources = Vec::new();
     if cursor.is_none() {
         resources.push(
-            Resource::new("hds://documents", "documents")
+            Resource::new("treefinder://documents", "documents")
                 .with_description("All registered documents with descriptors")
                 .with_mime_type("application/json"),
         );
@@ -111,7 +111,7 @@ pub(crate) fn list(
             };
             resources.push(
                 Resource::new(
-                    format!("hds://document/{}/content", d.document_id),
+                    format!("treefinder://document/{}/content", d.document_id),
                     d.logical_path.clone(),
                 )
                 .with_title(d.title.clone())
@@ -133,16 +133,16 @@ pub(crate) fn list(
     Ok(result)
 }
 
-/// Resolve a `hds://` URI against the open workspaces. Document and
+/// Resolve a `treefinder://` URI against the open workspaces. Document and
 /// search-run identifiers are UUIDs, so the first workspace that recognizes
-/// one wins; the aggregate `hds://documents` listing spans all workspaces.
+/// one wins; the aggregate `treefinder://documents` listing spans all workspaces.
 pub(crate) fn read(
     registry: &WorkspaceRegistry,
     actor: &Actor,
     uri: &str,
 ) -> HdsResult<ResourceContents> {
     let rest = uri
-        .strip_prefix("hds://")
+        .strip_prefix("treefinder://")
         .ok_or_else(|| HdsError::new(ErrorCode::InvalidPath, format!("unsupported URI '{uri}'")))?;
     if rest == "documents" {
         let mut all = Vec::new();
@@ -177,7 +177,7 @@ fn read_in(ws: &Workspace, actor: &Actor, uri: &str) -> HdsResult<ResourceConten
     };
 
     let rest = uri
-        .strip_prefix("hds://")
+        .strip_prefix("treefinder://")
         .ok_or_else(|| HdsError::new(ErrorCode::InvalidPath, format!("unsupported URI '{uri}'")))?;
     let parts: Vec<&str> = rest.split('/').collect();
     match parts.as_slice() {

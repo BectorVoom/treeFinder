@@ -7,11 +7,11 @@
 
 use super::Workspace;
 use crate::domain::{ErrorCode, HdsError, HdsResult};
-use crate::infra::paths::HDS_DIR;
+use crate::infra::paths::TREEFINDER_DIR;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Walk up from `start` to the nearest ancestor containing `.hds/config.yaml`.
+/// Walk up from `start` to the nearest ancestor containing `.treefinder/config.yaml`.
 pub fn find_workspace_root(start: &Path) -> HdsResult<PathBuf> {
     let mut dir = if start.is_absolute() {
         start.to_path_buf()
@@ -21,7 +21,7 @@ pub fn find_workspace_root(start: &Path) -> HdsResult<PathBuf> {
             .join(start)
     };
     loop {
-        if dir.join(HDS_DIR).join("config.yaml").is_file() {
+        if dir.join(TREEFINDER_DIR).join("config.yaml").is_file() {
             return Ok(dir);
         }
         if !dir.pop() {

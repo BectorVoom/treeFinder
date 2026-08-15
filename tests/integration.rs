@@ -49,8 +49,8 @@ fn rejects_unsafe_paths() {
         "/etc/passwd.md",
         "../escape.md",
         "notes/../../escape.md",
-        ".hds/config.yaml",
-        ".hds/x.md",
+        ".treefinder/config.yaml",
+        ".treefinder/x.md",
         "notes/plain.txt",
         "",
         "notes/\u{7}bell.md",
@@ -295,7 +295,7 @@ fn switching_default_strategy_changes_algorithm() {
     create_ops_doc(&ws);
     drop(ws);
     // Flip the config only — no code changes (acceptance criterion 4).
-    let config_path = dir.path().join(".hds/config.yaml");
+    let config_path = dir.path().join(".treefinder/config.yaml");
     let cfg = std::fs::read_to_string(&config_path).unwrap();
     std::fs::write(
         &config_path,
@@ -471,7 +471,7 @@ fn every_mutation_records_revision_and_audit() {
     )
     .unwrap();
 
-    let audit = std::fs::read_to_string(dir.path().join(".hds/logs/audit.jsonl")).unwrap();
+    let audit = std::fs::read_to_string(dir.path().join(".treefinder/logs/audit.jsonl")).unwrap();
     let events: Vec<Value> = audit
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
@@ -634,7 +634,7 @@ fn indexes_rebuildable_from_files_and_metadata() {
     let outcome = create_ops_doc(&ws);
     drop(ws);
     // Wipe all derived indexes.
-    std::fs::remove_dir_all(dir.path().join(".hds/indexes")).unwrap();
+    std::fs::remove_dir_all(dir.path().join(".treefinder/indexes")).unwrap();
     let ws = Workspace::open(dir.path()).unwrap();
     let (index, stale) = IndexService::new(&ws)
         .current_index(&outcome.document)
@@ -787,7 +787,7 @@ async fn mcp_full_flow_create_read_patch_tree_search_history() {
     wait_for(|| notifications.list_changed.load(Ordering::SeqCst)).await;
 
     let listed = client.list_resources(None).await.unwrap();
-    let content_uri = format!("hds://document/{doc_id}/content");
+    let content_uri = format!("treefinder://document/{doc_id}/content");
     assert!(
         listed.resources.iter().any(|r| r.uri == content_uri),
         "created document must be listed as a resource"
@@ -887,7 +887,7 @@ async fn mcp_full_flow_create_read_patch_tree_search_history() {
     );
     let hist = client
         .read_resource(ReadResourceRequestParams::new(format!(
-            "hds://document/{doc_id}/history"
+            "treefinder://document/{doc_id}/history"
         )))
         .await
         .unwrap();
@@ -901,7 +901,7 @@ async fn mcp_full_flow_create_read_patch_tree_search_history() {
     let run_id = sc["search_run_id"].as_str().unwrap();
     let trace = client
         .read_resource(ReadResourceRequestParams::new(format!(
-            "hds://search-run/{run_id}/trace"
+            "treefinder://search-run/{run_id}/trace"
         )))
         .await
         .unwrap();
@@ -960,7 +960,7 @@ async fn mcp_and_service_layer_produce_equivalent_results() {
 async fn mcp_tool_allowlist_blocks_tools() {
     let (dir, ws) = new_workspace();
     drop(ws);
-    let config_path = dir.path().join(".hds/config.yaml");
+    let config_path = dir.path().join(".treefinder/config.yaml");
     let cfg = std::fs::read_to_string(&config_path).unwrap();
     std::fs::write(
         &config_path,
@@ -992,7 +992,7 @@ fn read_only_mode_blocks_mutations() {
     let (dir, ws) = new_workspace();
     create_ops_doc(&ws);
     drop(ws);
-    let config_path = dir.path().join(".hds/config.yaml");
+    let config_path = dir.path().join(".treefinder/config.yaml");
     let cfg = std::fs::read_to_string(&config_path).unwrap();
     std::fs::write(
         &config_path,
@@ -1028,7 +1028,7 @@ fn read_only_mode_blocks_mutations() {
 fn size_limits_are_enforced() {
     let (dir, ws) = new_workspace();
     drop(ws);
-    let config_path = dir.path().join(".hds/config.yaml");
+    let config_path = dir.path().join(".treefinder/config.yaml");
     let cfg = std::fs::read_to_string(&config_path).unwrap();
     std::fs::write(
         &config_path,
@@ -1091,7 +1091,7 @@ async fn mcp_workspace_argument_targets_other_workspaces() {
     assert!(dir_b.path().join("documents/b.md").is_file());
 
     // Listings are scoped to the addressed workspace; a path *inside* the
-    // workspace resolves to its root by walking up to `.hds`.
+    // workspace resolves to its root by walking up to `.treefinder`.
     let paths = |result: &CallToolResult| -> Vec<String> {
         structured(result)["documents"]
             .as_array()
@@ -1239,14 +1239,14 @@ async fn mcp_resources_span_open_workspaces() {
             None => break,
         }
     }
-    assert!(uris.contains(&"hds://documents".to_string()));
-    assert!(uris.contains(&format!("hds://document/{a_id}/content")));
-    assert!(uris.contains(&format!("hds://document/{b_id}/content")));
+    assert!(uris.contains(&"treefinder://documents".to_string()));
+    assert!(uris.contains(&format!("treefinder://document/{a_id}/content")));
+    assert!(uris.contains(&format!("treefinder://document/{b_id}/content")));
 
     // Document-id URIs resolve across workspaces.
     let read = client
         .read_resource(ReadResourceRequestParams::new(format!(
-            "hds://document/{b_id}/content"
+            "treefinder://document/{b_id}/content"
         )))
         .await
         .unwrap();
@@ -1258,7 +1258,7 @@ async fn mcp_resources_span_open_workspaces() {
 
     // The aggregate descriptor listing spans both workspaces.
     let all = client
-        .read_resource(ReadResourceRequestParams::new("hds://documents"))
+        .read_resource(ReadResourceRequestParams::new("treefinder://documents"))
         .await
         .unwrap();
     let all_text = match &all.contents[0] {
@@ -1327,7 +1327,7 @@ async fn mcp_listen_stream_delivers_updates_on_draft_protocol() {
         .as_str()
         .unwrap()
         .to_string();
-    let content_uri = format!("hds://document/{doc_id}/content");
+    let content_uri = format!("treefinder://document/{doc_id}/content");
 
     // Open a stream for one URI plus the list-changed signal. Updates for the
     // document's other URIs must be filtered out by the accepted filter.

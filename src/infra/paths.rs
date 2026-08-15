@@ -2,13 +2,13 @@
 //!
 //! Every externally supplied document path is a *logical path* such as
 //! `notes/design.md`. It is validated lexically (no absolute paths, no `..`,
-//! no `.hds`, Markdown extension only) and then re-checked physically so that
+//! no `.treefinder`, Markdown extension only) and then re-checked physically so that
 //! symlinks cannot escape the workspace.
 
 use crate::domain::{ErrorCode, HdsError, HdsResult};
 use std::path::{Component, Path, PathBuf};
 
-pub const HDS_DIR: &str = ".hds";
+pub const TREEFINDER_DIR: &str = ".treefinder";
 pub const DOCUMENTS_DIR: &str = "documents";
 
 #[derive(Debug, Clone)]
@@ -29,20 +29,20 @@ impl WorkspaceLayout {
         self.root.join(DOCUMENTS_DIR)
     }
 
-    pub fn hds_dir(&self) -> PathBuf {
-        self.root.join(HDS_DIR)
+    pub fn treefinder_dir(&self) -> PathBuf {
+        self.root.join(TREEFINDER_DIR)
     }
 
     pub fn config_path(&self) -> PathBuf {
-        self.hds_dir().join("config.yaml")
+        self.treefinder_dir().join("config.yaml")
     }
 
     pub fn db_path(&self) -> PathBuf {
-        self.hds_dir().join("metadata.sqlite3")
+        self.treefinder_dir().join("metadata.sqlite3")
     }
 
     pub fn revisions_dir(&self, document_id: &str) -> PathBuf {
-        self.hds_dir().join("revisions").join(document_id)
+        self.treefinder_dir().join("revisions").join(document_id)
     }
 
     pub fn revision_path(&self, document_id: &str, revision_id: &str) -> PathBuf {
@@ -51,7 +51,7 @@ impl WorkspaceLayout {
     }
 
     pub fn indexes_dir(&self, document_id: &str) -> PathBuf {
-        self.hds_dir().join("indexes").join(document_id)
+        self.treefinder_dir().join("indexes").join(document_id)
     }
 
     pub fn index_path(&self, document_id: &str, index_version: &str) -> PathBuf {
@@ -60,7 +60,7 @@ impl WorkspaceLayout {
     }
 
     pub fn logs_dir(&self) -> PathBuf {
-        self.hds_dir().join("logs")
+        self.treefinder_dir().join("logs")
     }
 
     pub fn audit_log_path(&self) -> PathBuf {
@@ -73,8 +73,8 @@ impl WorkspaceLayout {
 
     pub fn create_directories(&self) -> HdsResult<()> {
         std::fs::create_dir_all(self.documents_dir())?;
-        std::fs::create_dir_all(self.hds_dir().join("revisions"))?;
-        std::fs::create_dir_all(self.hds_dir().join("indexes"))?;
+        std::fs::create_dir_all(self.treefinder_dir().join("revisions"))?;
+        std::fs::create_dir_all(self.treefinder_dir().join("indexes"))?;
         std::fs::create_dir_all(self.logs_dir())?;
         Ok(())
     }
@@ -100,9 +100,9 @@ impl WorkspaceLayout {
                     let part = part
                         .to_str()
                         .ok_or_else(|| HdsError::invalid_path("path is not valid UTF-8"))?;
-                    if part == HDS_DIR {
+                    if part == TREEFINDER_DIR {
                         return Err(HdsError::invalid_path(
-                            "internal .hds paths are not addressable",
+                            "internal .treefinder paths are not addressable",
                         ));
                     }
                     parts.push(part.to_string());

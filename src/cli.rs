@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
     about = "Hierarchical document store with tree-indexed search (files are canonical)"
 )]
 pub struct Cli {
-    /// Workspace root (defaults to the nearest ancestor containing .hds)
+    /// Workspace root (defaults to the nearest ancestor containing .treefinder)
     #[arg(long, global = true)]
     workspace: Option<PathBuf>,
     #[command(subcommand)]
