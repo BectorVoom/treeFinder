@@ -656,8 +656,10 @@ fn indexes_rebuildable_from_files_and_metadata() {
 use rmcp::ClientHandler;
 use rmcp::ServiceExt;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, JsonObject, ReadResourceRequestParams, ResourceContents,
-    ResourceUpdatedNotificationParam, SubscribeRequestParams,
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, Implementation,
+    JsonObject, ProtocolVersion, ReadResourceRequestParams, ResourceContents,
+    ResourceUpdatedNotificationParam, ServerNotification, SubscribeRequestParams,
+    SubscriptionFilter,
 };
 use rmcp::service::{NotificationContext, RoleClient, RunningService};
 use std::sync::Arc;
@@ -718,8 +720,8 @@ fn args(value: Value) -> JsonObject {
     value.as_object().cloned().expect("object args")
 }
 
-async fn call(
-    client: &RunningService<RoleClient, RecordingClient>,
+async fn call<H: ClientHandler>(
+    client: &RunningService<RoleClient, H>,
     name: &str,
     arguments: Value,
 ) -> CallToolResult {
@@ -821,7 +823,11 @@ async fn mcp_full_flow_create_read_patch_tree_search_history() {
     assert!(structured(&node)["content"].as_str().is_some());
 
     // Subscribe, patch with base revision (criterion 5), and expect an
-    // updated notification for the subscribed URI.
+    // updated notification for the subscribed URI. This client negotiates
+    // 2025-11-25, where `resources/subscribe` is still the subscription
+    // mechanism; see `mcp_listen_stream_delivers_updates_on_draft_protocol`
+    // for the 2026-07-28 replacement.
+    #[allow(deprecated)]
     client
         .subscribe(SubscribeRequestParams::new(content_uri.clone()))
         .await
@@ -1270,4 +1276,120 @@ async fn mcp_resources_span_open_workspaces() {
     assert!(ids.contains(&b_id.as_str()));
 
     client.cancel().await.ok();
+}
+
+/// Client negotiating the 2026-07-28 draft, where the server must serve
+/// `subscriptions/listen` because `resources/subscribe` is rejected.
+#[derive(Clone, Default)]
+struct DraftClient;
+
+impl ClientHandler for DraftClient {
+    fn get_info(&self) -> ClientInfo {
+        ClientInfo::new(
+            ClientCapabilities::default(),
+            Implementation::from_build_env(),
+        )
+        .with_protocol_version(ProtocolVersion::V_2026_07_28)
+    }
+}
+
+#[tokio::test]
+async fn mcp_listen_stream_delivers_updates_on_draft_protocol() {
+    let (_dir, ws) = new_workspace();
+    let (client_io, server_io) = tokio::io::duplex(1 << 20);
+    tokio::spawn(async move {
+        if let Ok(server) = tree_finder::mcp::HdsMcpServer::new(ws)
+            .serve(server_io)
+            .await
+        {
+            let _ = server.waiting().await;
+        }
+    });
+    let client = DraftClient.serve(client_io).await.expect("client connects");
+    assert_eq!(
+        client.peer_info().expect("server info").protocol_version,
+        ProtocolVersion::V_2026_07_28,
+        "server must serve the draft version the client asked for"
+    );
+
+    let created = call(
+        &client,
+        "document_create",
+        json!({ "path": "notes/setup.md", "content": "# Setup\n\nInstall steps.\n" }),
+    )
+    .await;
+    assert_eq!(created.is_error, Some(false));
+    let doc_id = structured(&created)["document"]["document_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rev1 = structured(&created)["revision"]["revision_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let content_uri = format!("hds://document/{doc_id}/content");
+
+    // Open a stream for one URI plus the list-changed signal. Updates for the
+    // document's other URIs must be filtered out by the accepted filter.
+    let mut stream = client
+        .listen(
+            SubscriptionFilter::builder()
+                .resource_subscription(content_uri.clone())
+                .resources_list_changed()
+                .build(),
+        )
+        .await
+        .expect("listen stream is established");
+    assert_eq!(
+        stream.acknowledged().resource_subscriptions.as_deref(),
+        Some([content_uri.clone()].as_slice())
+    );
+
+    let patch = diffy::create_patch(
+        "# Setup\n\nInstall steps.\n",
+        "# Setup\n\nInstall steps, then build.\n",
+    )
+    .to_string();
+    let patched = call(
+        &client,
+        "document_patch",
+        json!({
+            "document_id": doc_id, "base_revision": rev1, "patch": patch, "format": "unified_diff",
+        }),
+    )
+    .await;
+    assert_eq!(patched.is_error, Some(false), "patch failed: {patched:?}");
+
+    // A patch touches content/tree/history/descriptor, but only the subscribed
+    // content URI may reach the stream.
+    match next_notification(&mut stream).await {
+        ServerNotification::ResourceUpdatedNotification(n) => assert_eq!(n.params.uri, content_uri),
+        other => panic!("expected a resource update, got {other:?}"),
+    }
+
+    // A second create registers a new document: its own URIs are outside the
+    // filter, so the list-changed signal is the only thing that arrives.
+    let second = call(
+        &client,
+        "document_create",
+        json!({ "path": "notes/other.md", "content": "# Other\n" }),
+    )
+    .await;
+    assert_eq!(second.is_error, Some(false));
+    match next_notification(&mut stream).await {
+        ServerNotification::ResourceListChangedNotification(_) => {}
+        other => panic!("expected resources/list_changed, got {other:?}"),
+    }
+
+    stream.cancel().await.ok();
+    client.cancel().await.ok();
+}
+
+/// Await the next notification on a subscription, failing rather than hanging.
+async fn next_notification(stream: &mut rmcp::service::Subscription) -> ServerNotification {
+    tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .expect("notification arrives within 5s")
+        .expect("subscription stays healthy")
+        .expect("subscription stays open")
 }

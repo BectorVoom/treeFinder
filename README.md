@@ -77,6 +77,10 @@ Tools: `document_create/get/patch/replace/list/history/diff/restore`,
 `workspace_list`. Application errors return `isError` results with stable
 payloads (`{code, message, details, retryable}`, e.g. `REVISION_CONFLICT`).
 
+Change notifications follow whichever subscription mechanism the client's
+protocol version defines: `resources/subscribe` before 2026-07-28, and
+`subscriptions/listen` streams from 2026-07-28 on. Both are served.
+
 **Multi-workspace serving.** One long-lived server can address several
 workspaces: every workspace-scoped tool accepts an optional `workspace`
 argument — a path to (or inside) a workspace root — which the server resolves

@@ -6,8 +6,10 @@
 //! the CLI uses. Application failures surface as tool results carrying the
 //! stable wire payload (spec §11.5); JSON-RPC errors are reserved for
 //! unroutable requests. Resource-updated and list-changed notifications are
-//! emitted through the connected peer only after services return, i.e. after
-//! the file/revision/metadata transaction is durable.
+//! emitted only after services return, i.e. after the file/revision/metadata
+//! transaction is durable, over whichever subscription mechanism the peer's
+//! protocol version uses: `resources/subscribe` before 2026-07-28, and
+//! `subscriptions/listen` streams from 2026-07-28 on.
 
 mod resources;
 mod tools;
@@ -16,12 +18,15 @@ use crate::domain::{Actor, ActorType, HdsError};
 use crate::services::{Workspace, WorkspaceRegistry};
 use anyhow::Context as _;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ErrorData as McpError, Implementation,
-    ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
-    ReadResourceRequestParams, ReadResourceResult, ResourceUpdatedNotificationParam,
-    ServerCapabilities, ServerInfo, SubscribeRequestParams, UnsubscribeRequestParams,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ErrorData as McpError, Implementation,
+    ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, ProtocolVersion,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, RequestId,
+    ResourceUpdatedNotificationParam, ServerCapabilities, ServerInfo, SubscribeRequestParams,
+    SubscriptionFilter, UnsubscribeRequestParams,
 };
-use rmcp::service::{RequestContext, RoleServer};
+use rmcp::service::{
+    RequestContext, RoleServer, SubscriptionContext, SubscriptionSendError, SubscriptionSink,
+};
 use rmcp::{ServerHandler, ServiceExt};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -39,7 +44,12 @@ pub struct HdsMcpServer {
     // service work runs under one mutex. Handlers never await while holding
     // the guard.
     registry: Arc<Mutex<WorkspaceRegistry>>,
+    // `resources/subscribe` URIs, used by peers on protocol versions before
+    // 2026-07-28.
     subscriptions: Arc<Mutex<HashSet<String>>>,
+    // Open `subscriptions/listen` streams, used by peers on 2026-07-28 and
+    // later. Each sink applies its own accepted filter.
+    listeners: Arc<Mutex<Vec<SubscriptionSink>>>,
 }
 
 impl HdsMcpServer {
@@ -53,6 +63,7 @@ impl HdsMcpServer {
         HdsMcpServer {
             registry: Arc::new(Mutex::new(registry)),
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            listeners: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -63,10 +74,12 @@ impl HdsMcpServer {
     }
 
     fn actor_for(&self, context: &RequestContext<RoleServer>) -> Actor {
+        // From protocol version 2026-07-28 on, client identity travels in each
+        // request's metadata rather than only the handshake; `client_info`
+        // reads whichever of the two applies to this session.
         let id = context
-            .peer
-            .peer_info()
-            .map(|info| info.client_info.name.clone())
+            .client_info()
+            .map(|info| info.name.clone())
             .unwrap_or_else(|| "unknown-client".to_string());
         Actor {
             actor_type: ActorType::McpClient,
@@ -75,33 +88,96 @@ impl HdsMcpServer {
     }
 
     /// Send the notifications made due by `changes`, honoring subscriptions.
+    ///
+    /// The two subscription mechanisms are mutually exclusive per peer: before
+    /// protocol version 2026-07-28 a client subscribes with
+    /// `resources/subscribe` and gets plain peer notifications, and from
+    /// 2026-07-28 on it opens a `subscriptions/listen` stream instead (the SDK
+    /// rejects `resources/subscribe` outright on those sessions). Both are
+    /// driven from the same set of URIs the change could have touched.
     async fn notify_changes(&self, context: &RequestContext<RoleServer>, changes: &ChangeSet) {
-        let subscribed: Vec<String> = {
-            let subs = self
-                .subscriptions
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match &changes.document_id {
-                Some(id) => {
-                    let mut uris: Vec<String> = ["content", "tree", "history"]
-                        .iter()
-                        .map(|s| format!("hds://document/{id}/{s}"))
-                        .collect();
-                    uris.push(format!("hds://document/{id}"));
-                    uris.retain(|u| subs.contains(u));
-                    uris
-                }
-                None => Vec::new(),
+        let touched: Vec<String> = match &changes.document_id {
+            Some(id) => {
+                let mut uris: Vec<String> = ["content", "tree", "history"]
+                    .iter()
+                    .map(|s| format!("hds://document/{id}/{s}"))
+                    .collect();
+                uris.push(format!("hds://document/{id}"));
+                uris
             }
+            None => Vec::new(),
         };
-        for uri in subscribed {
-            let _ = context
-                .peer
-                .notify_resource_updated(ResourceUpdatedNotificationParam::new(uri))
-                .await;
+
+        if context
+            .protocol_version()
+            .is_none_or(|v| v < ProtocolVersion::V_2026_07_28)
+        {
+            let subscribed: Vec<String> = {
+                let subs = self
+                    .subscriptions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                touched
+                    .iter()
+                    .filter(|u| subs.contains(*u))
+                    .cloned()
+                    .collect()
+            };
+            for uri in subscribed {
+                let _ = context
+                    .peer
+                    .notify_resource_updated(ResourceUpdatedNotificationParam::new(uri))
+                    .await;
+            }
+            if changes.list_changed {
+                let _ = context.peer.notify_resource_list_changed().await;
+            }
+            return;
         }
-        if changes.list_changed {
-            let _ = context.peer.notify_resource_list_changed().await;
+
+        self.notify_listeners(&touched, changes.list_changed).await;
+    }
+
+    /// Fan a change out to every open `subscriptions/listen` stream. Each sink
+    /// drops the URIs and categories its client did not ask for, so this sends
+    /// the full candidate set and lets the SDK filter. Streams that have since
+    /// closed are dropped from the registry.
+    async fn notify_listeners(&self, touched: &[String], list_changed: bool) {
+        let sinks: Vec<SubscriptionSink> = self
+            .listeners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let mut closed: Vec<RequestId> = Vec::new();
+        for sink in sinks {
+            let mut open = true;
+            for uri in touched {
+                if matches!(
+                    sink.notify_resource_updated(uri.clone()).await,
+                    Err(SubscriptionSendError::SubscriptionClosed)
+                ) {
+                    open = false;
+                    break;
+                }
+            }
+            if open
+                && list_changed
+                && matches!(
+                    sink.notify_resource_list_changed().await,
+                    Err(SubscriptionSendError::SubscriptionClosed)
+                )
+            {
+                open = false;
+            }
+            if !open {
+                closed.push(sink.id().clone());
+            }
+        }
+        if !closed.is_empty() {
+            self.listeners
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|s| !closed.contains(s.id()));
         }
     }
 }
@@ -137,7 +213,7 @@ impl ServerHandler for HdsMcpServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let actor = self.actor_for(&context);
         let outcome = {
             let mut registry = self.registry();
@@ -146,9 +222,11 @@ impl ServerHandler for HdsMcpServer {
         match outcome {
             Ok((value, changes)) => {
                 self.notify_changes(&context, &changes).await;
-                Ok(CallToolResult::structured(value))
+                Ok(CallToolResult::structured(value).into())
             }
-            Err(ToolFailure::Application(e)) => Ok(CallToolResult::structured_error(e.to_wire())),
+            Err(ToolFailure::Application(e)) => {
+                Ok(CallToolResult::structured_error(e.to_wire()).into())
+            }
             Err(ToolFailure::UnknownTool(name)) => Err(McpError::invalid_params(
                 format!("unknown tool '{name}'"),
                 None,
@@ -191,11 +269,11 @@ impl ServerHandler for HdsMcpServer {
         &self,
         request: ReadResourceRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         let actor = self.actor_for(&context);
         let registry = self.registry();
         resources::read(&registry, &actor, &request.uri)
-            .map(|contents| ReadResourceResult::new(vec![contents]))
+            .map(|contents| ReadResourceResult::new(vec![contents]).into())
             .map_err(|e| match e.code {
                 crate::domain::ErrorCode::NotFound => {
                     McpError::resource_not_found(e.message.clone(), Some(e.to_wire()))
@@ -204,6 +282,35 @@ impl ServerHandler for HdsMcpServer {
             })
     }
 
+    /// Accept whatever the client asked for. The SDK narrows this to the
+    /// intersection of the request and the capabilities `get_info` advertises,
+    /// so a category this server cannot emit is never acknowledged.
+    fn accepted_subscription_filter(
+        &self,
+        requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        Some(requested.clone())
+    }
+
+    /// Hold one `subscriptions/listen` stream open, registering its sink so
+    /// `notify_changes` can reach it, until the client cancels the request.
+    async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
+        let sink = context.sink().clone();
+        let id = sink.id().clone();
+        self.listeners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(sink);
+        context.cancelled().await;
+        self.listeners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|s| s.id() != &id);
+        Ok(())
+    }
+
+    /// Legacy subscription path (protocol versions before 2026-07-28); newer
+    /// sessions use `listen` and never reach this.
     async fn subscribe(
         &self,
         request: SubscribeRequestParams,
