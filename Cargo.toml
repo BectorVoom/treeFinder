@@ -2,6 +2,12 @@
 name = "tree_finder"
 version = "0.1.0"
 edition = "2024"
+description = "A local-first Markdown document store with hierarchical tree indexes, explainable tree search, full revision history, an audit log, an MCP stdio server, and an equivalent CLI"
+license = "MIT"
+repository = "https://github.com/BectorVoom/treeFinder"
+readme = "README.md"
+keywords = ["document-store", "markdown", "hierarchical", "mcp", "search"]
+categories = ["command-line-utilities", "database", "text-processing"]
 
 [lib]
 name = "tree_finder"
